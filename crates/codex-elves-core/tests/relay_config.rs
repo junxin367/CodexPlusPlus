@@ -2314,7 +2314,8 @@ fn clear_relay_config_removes_model_provider_and_preserves_other_config() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
-        r#"model = "gpt-5"
+        r#"forced_login_method = 'api'
+model = "gpt-5"
 model_provider = "custom"
 [model_providers.custom]
 name = "custom"
@@ -2349,6 +2350,7 @@ model = "gpt-5-mini"
             .is_some_and(|path| path.contains("codex-elves-live-"))
     );
     assert!(updated.contains(r#"model = "gpt-5""#));
+    assert!(!updated.contains("forced_login_method"));
     assert!(!updated.contains("model_provider ="));
     assert!(!updated.contains("model_catalog_json"));
     assert!(!updated.contains("OPENAI_API_KEY"));

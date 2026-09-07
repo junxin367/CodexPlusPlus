@@ -1176,6 +1176,7 @@ pub fn clear_relay_config_to_home_with_auth_and_computer_use_guard(
     let mut updated = without_tables;
     for key in [
         "OPENAI_API_KEY",
+        "forced_login_method",
         "model_provider",
         "model_catalog_json",
         "base_url",
