@@ -293,23 +293,22 @@
         display: grid;
         place-items: center;
         padding: 24px;
-        background: var(--codex-elves-modal-overlay-background);
-        backdrop-filter: none;
+        background: rgba(0, 0, 0, 0.62);
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
 
       .codex-workspace-checkpoint-dialog {
         width: min(640px, calc(100vw - 48px));
-        max-height: min(790px, calc(100vh - 48px));
+        max-height: min(790px, calc(100vh - 60px));
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        border: 1px solid var(--codex-elves-modal-border);
-        border-radius: var(--codex-elves-modal-radius);
-        background: var(--codex-elves-modal-surface);
-        color: var(--codex-elves-modal-foreground);
-        box-shadow: var(--codex-elves-modal-shadow);
+        border: 1px solid rgba(255, 255, 255, 0.13);
+        border-radius: 16px;
+        background: #202123;
+        color: #f3f4f6;
+        box-shadow: 0 28px 100px rgba(0, 0, 0, 0.5);
         font:
           13px/1.5 "Segoe UI Variable Text",
           "Microsoft YaHei UI", system-ui, sans-serif;
@@ -349,9 +348,11 @@
         overflow-y: auto;
         display: grid;
         grid-template-columns: minmax(0, 1fr);
+        grid-auto-rows: max-content;
+        align-content: start;
         gap: 10px;
         padding: 12px 14px 14px;
-        background: transparent;
+        background: #1b1c1e;
         scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
         scrollbar-width: thin;
       }
@@ -885,8 +886,14 @@
           </button>
         </div>
 
-        <div class="codex-workspace-checkpoint-list">
-          <div class="codex-workspace-checkpoint-item">
+        <div
+          class="codex-workspace-checkpoint-list"
+          data-checkpoint-list
+        >
+          <div
+            class="codex-workspace-checkpoint-item"
+            data-dense-checkpoint-template
+          >
             <div class="checkpoint-item-main">
               <div class="checkpoint-item-copy">
                 <div class="checkpoint-title-line">
@@ -1175,13 +1182,167 @@
       const confirmTitle = document.querySelector("[data-confirm-title]");
       const confirmMessage = document.querySelector("[data-confirm-message]");
       const confirmAccept = document.querySelector("[data-confirm-accept]");
+      const checkpointList = document.querySelector("[data-checkpoint-list]");
+      const denseCheckpointTemplate = document.querySelector(
+        "[data-dense-checkpoint-template]",
+      );
       const dialogSurface = overlay.querySelector(
         ".codex-workspace-checkpoint-dialog",
       );
+      const denseCheckpointRows = [
+        {
+          title: "好的，修订 Plan 跟 Tasks，但是涉及不要立即回滚的策略需要先确认",
+          time: "今天 06:38",
+          files: 9,
+          added: 184,
+          deleted: 72,
+          path: "docs/plans/checkpoint-dialog-layout.md",
+        },
+        {
+          title: "更新 Plan 和 Tasks，显示会使用嵌入主窗口的交互方式",
+          time: "今天 06:22",
+          files: 5,
+          added: 96,
+          deleted: 31,
+          path: "docs/plans/checkpoint-dialog-tasks.md",
+        },
+        {
+          title: "确认目标",
+          time: "今天 01:03",
+          files: 2,
+          added: 21,
+          deleted: 8,
+          path: "README.md",
+        },
+        {
+          title: "2：固定为 50，当部署周期的 playwright 已是成功状态时保持原结果",
+          time: "今天 00:51",
+          files: 4,
+          added: 58,
+          deleted: 19,
+          path: "scripts/verify-playwright.ps1",
+        },
+        {
+          title: "1、是。2、整理并嵌入 playwright，直接使用现有浏览器能力",
+          time: "昨天 22:16",
+          files: 7,
+          added: 143,
+          deleted: 47,
+          path: "crates/codex-elves-core/tests/cdp_bridge.rs",
+        },
+        {
+          title: "方案关于修改方法与执行边界需要明确，避免影响已有入口",
+          time: "昨天 21:49",
+          files: 3,
+          added: 35,
+          deleted: 12,
+          path: "assets/inject/renderer-features.js",
+        },
+        {
+          title: "转换以下分类，将普通轮次以及初始化状态使用新的展示方式",
+          time: "昨天 19:56",
+          files: 6,
+          added: 117,
+          deleted: 29,
+          path: "crates/codex-elves-core/src/workspace_checkpoint.rs",
+        },
+        {
+          title: "错误码也不是新增说明，我们对于错误处理本身是访问限制问题",
+          time: "昨天 19:29",
+          files: 3,
+          added: 44,
+          deleted: 18,
+          path: "crates/codex-elves-core/src/routes.rs",
+        },
+        {
+          title: "搜索整个函数调用链并确认其恢复边界，之后给出修改结果",
+          time: "昨天 18:53",
+          files: 8,
+          added: 202,
+          deleted: 65,
+          path: "crates/codex-elves-core/tests/workspace_checkpoint.rs",
+        },
+        {
+          title: "# Files mentioned by the user: ## codex-clipboard-005ad3…",
+          time: "昨天 18:38",
+          files: 1,
+          added: 12,
+          deleted: 4,
+          path: "output/checkpoint-dialog-preview.html",
+        },
+        {
+          title: "我不是要修改页面规则，把弹窗重新按现有的交互层次还原",
+          time: "昨天 18:28",
+          files: 5,
+          added: 78,
+          deleted: 23,
+          path: "assets/inject/renderer-features.js",
+        },
+        {
+          title: "还是不明白为什么当前明细会被压缩，需要先完整复现现场",
+          time: "昨天 18:18",
+          files: 2,
+          added: 29,
+          deleted: 9,
+          path: "output/checkpoint-dialog-preview.html",
+        },
+        {
+          title: "配置设计 C_01 与 CodexTestConf 注入不应该改变弹窗层级",
+          time: "昨天 18:16",
+          files: 4,
+          added: 63,
+          deleted: 17,
+          path: "crates/codex-elves-core/src/settings.rs",
+        },
+        {
+          title: "业务数据过多时会失去正常的调节空间，需要保留滚动区域",
+          time: "昨天 18:12",
+          files: 6,
+          added: 105,
+          deleted: 38,
+          path: "assets/inject/renderer-features.js",
+        },
+      ];
       let toastTimer = 0;
       let pendingModelAction = "";
       let confirmationPreviousFocus = null;
       let confirmationBackgroundState = null;
+
+      const denseCheckpointFragment = document.createDocumentFragment();
+      denseCheckpointRows
+        .filter((row) => row.files > 0)
+        .forEach((row) => {
+          const item = denseCheckpointTemplate.cloneNode(true);
+          item.removeAttribute("data-dense-checkpoint-template");
+
+          const stage = item.querySelector(".checkpoint-stage");
+          stage.textContent = "本轮完成";
+          stage.dataset.kind = "turn";
+
+          const title = item.querySelector(
+            ".codex-workspace-checkpoint-item-title",
+          );
+          title.textContent = row.title;
+          title.title = row.title;
+
+          item.querySelector(".checkpoint-time").textContent = row.time;
+          item.querySelector(".checkpoint-summary strong").textContent =
+            `${row.files} 个文件发生变化`;
+          item.querySelector(".checkpoint-added").textContent = `+${row.added}`;
+          item.querySelector(".checkpoint-deleted").textContent =
+            `-${row.deleted}`;
+
+          const firstPath = item.querySelector(".checkpoint-file-path");
+          firstPath.textContent = row.path;
+          firstPath.title = row.path;
+
+          const restoreButton = item.querySelector(
+            ".checkpoint-restore-button",
+          );
+          restoreButton.dataset.modelAction = `恢复到“${row.title}”`;
+          denseCheckpointFragment.append(item);
+        });
+      checkpointList.prepend(denseCheckpointFragment);
 
       function showToast(message) {
         window.clearTimeout(toastTimer);

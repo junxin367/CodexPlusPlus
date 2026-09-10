@@ -9,14 +9,24 @@
         color-scheme: dark;
         font-family:
           "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
-        --codex-elves-modal-overlay-background: rgba(0, 0, 0, 0.45);
-        --codex-elves-modal-surface: #303030;
+        --codex-elves-modal-overlay-background: rgba(0, 0, 0, 0.52);
+        --codex-elves-modal-surface: #2b2b2b;
         --codex-elves-modal-foreground: #f3f4f6;
         --codex-elves-modal-border: rgba(255, 255, 255, 0.12);
         --codex-elves-modal-radius: 18px;
-        --codex-elves-modal-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
-        --codex-elves-control-surface: #202020;
-        --codex-elves-footer-surface: #232323;
+        --codex-elves-modal-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+        --codex-elves-control-surface: color-mix(
+          in srgb,
+          var(--codex-elves-modal-surface) 86%,
+          black 14%
+        );
+        --codex-elves-control-menu-surface: color-mix(
+          in srgb,
+          var(--codex-elves-modal-surface) 94%,
+          black 6%
+        );
+        --codex-elves-control-border: rgba(255, 255, 255, 0.16);
+        --codex-elves-footer-surface: var(--codex-elves-modal-surface);
         --codex-elves-accent: #10a37f;
       }
 
@@ -282,7 +292,7 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 24px;
+        padding: 20px;
         background: var(--codex-elves-modal-overlay-background);
       }
 
@@ -291,8 +301,8 @@
       }
 
       .codex-prompt-optimize-settings {
-        width: min(600px, calc(100vw - 48px));
-        height: min(554px, calc(100vh - 48px));
+        width: min(600px, calc(100vw - 40px));
+        height: min(554px, calc(100vh - 40px));
         min-height: 430px;
         display: flex;
         flex-direction: column;
@@ -416,7 +426,7 @@
       .codex-prompt-optimize-prompt textarea {
         width: 100%;
         box-sizing: border-box;
-        border: 1px solid rgba(255, 255, 255, 0.16);
+        border: 1px solid var(--codex-elves-control-border);
         border-radius: 9px;
         background: var(--codex-elves-control-surface);
         color: inherit;
@@ -448,9 +458,9 @@
         left: 0;
         max-height: 190px;
         overflow-y: auto;
-        border: 1px solid rgba(255, 255, 255, 0.16);
+        border: 1px solid var(--codex-elves-control-border);
         border-radius: 9px;
-        background: #292929;
+        background: var(--codex-elves-control-menu-surface);
         box-shadow: 0 12px 32px rgba(0, 0, 0, 0.42);
         padding: 4px;
       }
@@ -499,7 +509,7 @@
         justify-content: space-between;
         gap: 12px;
         padding: 0 11px;
-        border: 1px solid rgba(255, 255, 255, 0.16);
+        border: 1px solid var(--codex-elves-control-border);
         border-radius: 9px;
         background: var(--codex-elves-control-surface);
         cursor: pointer;

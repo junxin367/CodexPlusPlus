@@ -12,9 +12,10 @@ use codex_elves_core::relay_config::{
     filter_common_config_for_selection, list_context_entries_from_common_config,
     normalize_relay_profile_for_storage, relay_config_status_from_home,
     sanitize_common_config_contents, set_codex_goals_feature_in_home,
-    strip_common_config_from_config, sync_applied_relay_profile_provider_name_to_home,
-    sync_applied_relay_profile_websocket_to_home, sync_live_config_context_entries,
-    sync_live_config_context_entry, upsert_context_entry_in_common_config,
+    strip_common_config_from_config, sync_applied_relay_profile_multi_agent_v2_to_home,
+    sync_applied_relay_profile_provider_name_to_home, sync_applied_relay_profile_websocket_to_home,
+    sync_live_config_context_entries, sync_live_config_context_entry,
+    upsert_context_entry_in_common_config,
 };
 use codex_elves_core::settings::{
     RelayContextSelection, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
@@ -3178,6 +3179,92 @@ base_url = "https://relay.example/v1"
     let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(config.contains("[model_providers.custom]"));
     assert!(config.contains(r#"name = "OpenAI""#));
+}
+
+#[test]
+fn apply_relay_profile_to_home_with_switch_rules_syncs_multi_agent_v2_feature() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"[features]
+goals = true
+multi_agent_v2 = true
+"#,
+    )
+    .unwrap();
+    let mut profile = RelayProfile {
+        id: "relay-a".to_string(),
+        model: "gpt-5.6-sol".to_string(),
+        base_url: "https://relay.example/v1".to_string(),
+        api_key: "sk-new".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model = "gpt-5.6-sol"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay.example/v1"
+"#
+        .to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
+        ..RelayProfile::default()
+    };
+
+    apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
+
+    let disabled = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(disabled.contains("goals = true"));
+    assert!(!disabled.contains("multi_agent_v2"));
+
+    profile
+        .config_contents
+        .push_str("\n[features]\nmulti_agent_v2 = true\n");
+    apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
+
+    let enabled = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(enabled.contains("goals = true"));
+    assert!(enabled.contains("multi_agent_v2 = true"));
+}
+
+#[test]
+fn sync_applied_relay_profile_multi_agent_v2_to_home_updates_active_live_config() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+
+[features]
+goals = true
+"#,
+    )
+    .unwrap();
+    let mut profile = RelayProfile {
+        id: "relay-a".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model_provider = "custom"
+
+[features]
+multi_agent_v2 = true
+"#
+        .to_string(),
+        ..RelayProfile::default()
+    };
+
+    assert!(sync_applied_relay_profile_multi_agent_v2_to_home(temp.path(), &profile).unwrap());
+    let enabled = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(enabled.contains("goals = true"));
+    assert!(enabled.contains("multi_agent_v2 = true"));
+
+    profile.config_contents = "model_provider = \"custom\"\n".to_string();
+    assert!(sync_applied_relay_profile_multi_agent_v2_to_home(temp.path(), &profile).unwrap());
+    let disabled = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(disabled.contains("goals = true"));
+    assert!(!disabled.contains("multi_agent_v2"));
 }
 
 #[test]

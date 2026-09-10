@@ -179,6 +179,7 @@ pub struct CreateCheckpointResult {
 #[serde(rename_all = "camelCase")]
 pub struct CompleteTurnResult {
     pub checkpoint: WorkspaceCheckpoint,
+    pub omitted: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -493,9 +494,9 @@ impl WorkspaceCheckpointService {
             bail!("完成工作区 Checkpoint 必须提供 turnId");
         }
 
-        let checkpoint = self
-            .load_checkpoints(&state)?
-            .into_iter()
+        let checkpoints = self.load_checkpoints(&state)?;
+        let checkpoint = checkpoints
+            .iter()
             .rev()
             .find(|checkpoint| {
                 checkpoint.kind == WorkspaceCheckpointKind::TurnStart
@@ -503,20 +504,28 @@ impl WorkspaceCheckpointService {
                     && checkpoint.thread_id == thread_id
                     && checkpoint.turn_id.as_deref() == Some(turn_id)
             })
+            .cloned()
             .ok_or_else(|| anyhow!("未找到与该轮次对应的工作区 Checkpoint"))?;
         if checkpoint.turn_status.is_some() {
-            return Ok(CompleteTurnResult { checkpoint });
+            return Ok(CompleteTurnResult {
+                omitted: omits_empty_turn(&checkpoint),
+                checkpoint,
+            });
         }
 
         self.verify_commit(&state, &workspace, &checkpoint.commit_hash)?;
         let changed_files =
             self.worktree_file_changes(&state, &workspace, &checkpoint.commit_hash)?;
+        let completed_at_ms = now_ms();
+        // 空轮次只从展示与统计中省略，起始快照仍需保留，确保 beforeTurnId 与
+        // numTurns 始终按真实逻辑轮次定位。
+        let omitted = changed_files.is_empty() && !checkpoint.initialization;
         self.append_event(
             &state,
             &CheckpointEvent::Completed {
                 checkpoint_id: checkpoint.id.clone(),
                 status: request.status,
-                completed_at_ms: now_ms(),
+                completed_at_ms,
                 changed_files,
             },
         )?;
@@ -525,7 +534,10 @@ impl WorkspaceCheckpointService {
             .into_iter()
             .find(|candidate| candidate.id == checkpoint.id)
             .ok_or_else(|| anyhow!("Checkpoint 完成后状态读取失败"))?;
-        Ok(CompleteTurnResult { checkpoint })
+        Ok(CompleteTurnResult {
+            checkpoint,
+            omitted,
+        })
     }
 
     pub fn list_checkpoints(
@@ -546,6 +558,7 @@ impl WorkspaceCheckpointService {
             .into_iter()
             .rev()
             .filter(|checkpoint| thread_id.is_empty() || checkpoint.thread_id == thread_id)
+            .filter(|checkpoint| !omits_empty_turn(checkpoint))
             .take(limit)
             .collect();
         Ok(ListCheckpointsResult {
@@ -596,7 +609,6 @@ impl WorkspaceCheckpointService {
         let _lock = self.lock_workspace(&state)?;
         self.prepare_repository(&workspace, &state)?;
         let checkpoint = self.checkpoint_for_revert(&state, &request)?;
-        self.verify_commit(&state, &workspace, &checkpoint.commit_hash)?;
         let changed_paths =
             self.worktree_changed_paths(&state, &workspace, &checkpoint.commit_hash)?;
         let has_changes = !changed_paths.is_empty();
@@ -809,7 +821,11 @@ impl WorkspaceCheckpointService {
 
         for (key, state) in self.workspace_states()? {
             let _workspace_lock = self.lock_workspace(&state)?;
-            let checkpoints = self.load_checkpoints(&state)?;
+            let checkpoints = self
+                .load_checkpoints(&state)?
+                .into_iter()
+                .filter(|checkpoint| !omits_empty_turn(checkpoint))
+                .collect::<Vec<_>>();
             let descriptor = read_workspace_descriptor(&state.dir);
             let workspace = descriptor
                 .as_ref()
@@ -1250,7 +1266,7 @@ impl WorkspaceCheckpointService {
                 ["read-tree", target],
                 "准备 Checkpoint 预检",
             )?;
-            self.run_git_with_index_checked(
+            let status = self.run_git_with_index_checked(
                 state,
                 workspace,
                 &index_path,
@@ -1258,40 +1274,14 @@ impl WorkspaceCheckpointService {
                     "status",
                     "--porcelain=v1",
                     "-z",
-                    "--untracked-files=no",
+                    "--untracked-files=all",
+                    "--no-renames",
                     "--",
                     ".",
                 ],
-                "刷新 Checkpoint 预检索引",
+                "检查工作区文件变化",
             )?;
-            let tracked = self.run_git_with_index_checked(
-                state,
-                workspace,
-                &index_path,
-                ["diff-files", "--name-only", "-z", "--", "."],
-                "检查已跟踪文件变化",
-            )?;
-            let untracked = self.run_git_with_index_checked(
-                state,
-                workspace,
-                &index_path,
-                [
-                    "ls-files",
-                    "--others",
-                    "--exclude-standard",
-                    "-z",
-                    "--",
-                    ".",
-                ],
-                "检查新增文件",
-            )?;
-            let changed_paths = split_nul(&tracked.stdout)
-                .chain(split_nul(&untracked.stdout))
-                .map(|path| String::from_utf8_lossy(path).into_owned())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            Ok(changed_paths)
+            parse_porcelain_paths(&status.stdout)
         })();
 
         let cleanup_result = [index_path.as_path(), lock_path.as_path()]
@@ -1447,12 +1437,12 @@ impl WorkspaceCheckpointService {
                 exclude.push_str("/\n");
             }
         }
-        fs::write(
-            state.git_dir.join("info").join("exclude"),
+        write_file_if_changed(
+            &state.git_dir.join("info").join("exclude"),
             exclude.as_bytes(),
         )?;
-        fs::write(
-            state.git_dir.join("info").join("attributes"),
+        write_file_if_changed(
+            &state.git_dir.join("info").join("attributes"),
             b"* -text -eol -filter -ident -working-tree-encoding\n",
         )?;
 
@@ -1463,9 +1453,9 @@ impl WorkspaceCheckpointService {
             schema_version: STORAGE_VERSION,
             workspace: workspace_string(workspace),
         };
-        fs::write(
-            state.dir.join("workspace.json"),
-            serde_json::to_vec_pretty(&descriptor)?,
+        write_file_if_changed(
+            &state.dir.join("workspace.json"),
+            &serde_json::to_vec_pretty(&descriptor)?,
         )?;
         Ok(())
     }
@@ -2338,6 +2328,17 @@ fn replace_file(source: &Path, target: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("无法替换 Checkpoint 索引：{}", target.to_string_lossy()))
 }
 
+fn write_file_if_changed(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    match fs::read(path) {
+        Ok(existing) if existing == contents => Ok(()),
+        Ok(_) => fs::write(path, contents).map_err(Into::into),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::write(path, contents).map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn remove_path(path: &Path) -> anyhow::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -2511,6 +2512,16 @@ fn validate_thread_scope(
     Ok(())
 }
 
+fn omits_empty_turn(checkpoint: &WorkspaceCheckpoint) -> bool {
+    checkpoint.kind == WorkspaceCheckpointKind::TurnStart
+        && checkpoint.accepted
+        && !checkpoint.initialization
+        && checkpoint.change_scope == WorkspaceCheckpointChangeScope::Turn
+        && checkpoint.turn_status.is_some()
+        && checkpoint.changed_file_count == 0
+        && checkpoint.changed_files.is_empty()
+}
+
 fn workspace_key(workspace: &Path) -> String {
     let normalized = normalized_workspace_key(workspace);
     let digest = Sha256::digest(normalized.as_bytes());
@@ -2580,6 +2591,19 @@ fn split_nul(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     bytes
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
+}
+
+fn parse_porcelain_paths(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
+    split_nul(bytes)
+        .filter_map(|record| {
+            if record.len() < 4 || record[2] != b' ' {
+                return Some(Err(anyhow!("Git 返回了无法识别的工作区文件状态")));
+            }
+            let worktree_changed = record[1] != b' ' || &record[..2] == b"??";
+            worktree_changed.then(|| Ok(String::from_utf8_lossy(&record[3..]).into_owned()))
+        })
+        .collect::<anyhow::Result<BTreeSet<_>>>()
+        .map(|paths| paths.into_iter().collect())
 }
 
 fn parse_file_changes(

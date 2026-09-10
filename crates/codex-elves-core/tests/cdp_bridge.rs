@@ -271,9 +271,16 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     assert!(script.contains(
         ".codex-workspace-checkpoint-list {\n        min-width: 0;\n        min-height: 120px;"
     ));
-    assert!(
-        script.contains("overflow-x: hidden;\n        overflow-y: auto;\n        display: grid;")
-    );
+    let checkpoint_list = script
+        .split_once(".codex-workspace-checkpoint-list {")
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(rule, _)| rule)
+        .expect("missing checkpoint list rule");
+    assert!(checkpoint_list.contains("overflow-x: hidden;"));
+    assert!(checkpoint_list.contains("overflow-y: auto;"));
+    assert!(checkpoint_list.contains("display: grid;"));
+    assert!(checkpoint_list.contains("grid-auto-rows: max-content;"));
+    assert!(checkpoint_list.contains("align-content: start;"));
     assert!(script.contains(
         ".codex-workspace-checkpoint-item {\n        min-width: 0;\n        max-width: 100%;"
     ));
@@ -295,7 +302,7 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
 }
 
 #[test]
-fn renderer_modal_shell_uses_shared_visual_contract() {
+fn renderer_modal_shell_preserves_each_dialog_visual_contract() {
     let script = assets::renderer_features_script();
 
     for expected in [
@@ -327,10 +334,43 @@ fn renderer_modal_shell_uses_shared_visual_contract() {
             .count()
             >= 6
     );
-    assert!(script.matches("backdrop-filter: none;").count() >= 6);
+    assert!(script.matches("backdrop-filter: none;").count() >= 4);
     assert!(!script.contains("backdrop-filter: blur(4px)"));
     assert!(!script.contains("background: rgba(0,0,0,.58)"));
-    assert!(!script.contains("background: rgba(0,0,0,.62)"));
+    let checkpoint_overlay = script
+        .split_once(".codex-workspace-checkpoint-overlay {")
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(rule, _)| rule)
+        .expect("missing checkpoint overlay rule");
+    assert!(checkpoint_overlay.contains("background: rgba(0,0,0,.62);"));
+    assert!(!checkpoint_overlay.contains("--codex-elves-modal-overlay-background"));
+
+    let checkpoint_dialog = script
+        .split_once(".codex-workspace-checkpoint-dialog {")
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(rule, _)| rule)
+        .expect("missing checkpoint dialog rule");
+    assert!(checkpoint_dialog.contains("background: #202123;"));
+    assert!(checkpoint_dialog.contains("border-radius: 16px;"));
+
+    let prompt_overlay = script
+        .split_once(".${codexPromptOptimizeSettingsOverlayClass} {")
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(rule, _)| rule)
+        .expect("missing prompt optimize overlay rule");
+    assert!(prompt_overlay.contains("padding: 20px;"));
+    assert!(prompt_overlay.contains("background: rgba(0,0,0,.52);"));
+    assert!(!prompt_overlay.contains("--codex-elves-modal-overlay-background"));
+
+    let prompt_dialog = script
+        .split_once(".codex-prompt-optimize-settings {")
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(rule, _)| rule)
+        .expect("missing prompt optimize dialog rule");
+    assert!(prompt_dialog.contains("width: min(600px, calc(100vw - 40px));"));
+    assert!(
+        prompt_dialog.contains("background: var(--color-token-main-surface-primary, #2b2b2b);")
+    );
     assert!(
         script.contains(
             "max-height: min(520px, calc(100vh - var(--codex-elves-modal-viewport-gap)))"
@@ -397,19 +437,31 @@ fn renderer_workspace_checkpoint_request_contract_is_fail_closed_and_restore_fir
             "status": "failed"
         })
     );
+    assert_eq!(
+        result["fastCompletionPayload"],
+        json!({
+            "cwd": "C:\\repo",
+            "threadId": "thread-12345678",
+            "turnId": "fast-turn",
+            "status": "completed"
+        })
+    );
     assert_eq!(result["editButtonText"], "发送并恢复文件");
     assert_eq!(result["editButtonType"], "button");
+    assert_eq!(result["editButtonDisabledFromCompletionHint"], true);
+    assert_eq!(result["editButtonTitleFromCompletionHint"], "无文件变化");
+    assert_eq!(result["editButtonPreviewPendingAfterHint"], true);
     assert_eq!(result["editButtonDisabledWhenNoChanges"], true);
     assert_eq!(result["editButtonTitle"], "无文件变化");
     assert_eq!(result["editButtonPreviewNumTurns"], 1);
     assert_eq!(result["checkpointDialogHasStages"], true);
-    assert_eq!(result["checkpointDialogRestoreButtonCount"], 8);
+    assert_eq!(result["checkpointDialogRestoreButtonCount"], 7);
     assert_eq!(result["checkpointDialogFileRowCount"], 7);
     assert_eq!(result["checkpointDialogHasInitialization"], true);
     assert_eq!(result["checkpointDialogHidesInitializationFileRows"], true);
     assert_eq!(result["checkpointDialogEscapesContent"], true);
     assert_eq!(result["checkpointDialogHasTotalStat"], true);
-    assert_eq!(result["checkpointDialogHasNoChange"], true);
+    assert_eq!(result["checkpointDialogOmitsCompletedNoChange"], true);
     assert_eq!(result["checkpointDialogHasPendingChangeCapture"], true);
     assert_eq!(result["checkpointDialogHasLegacyFallback"], true);
     assert_eq!(result["checkpointDialogHasDefaultCollapse"], true);
@@ -625,6 +677,9 @@ let lastRevertPayload = null;
 let lastPreviewPayload = null;
 let delayedBindStarted = null;
 let releaseDelayedBind = null;
+let holdPreview = false;
+let markPreviewStarted = null;
+let releasePreview = null;
 window.__codexSessionDeleteBridge = async (path, payload) => {{
   if (path === "/settings/get") {{
     return {{
@@ -653,18 +708,29 @@ window.__codexSessionDeleteBridge = async (path, payload) => {{
   }}
   if (path === "/workspace-checkpoint/complete-turn") {{
     lastCompletePayload = payload;
+    const noChanges = payload.turnId === "fast-turn";
     return {{
       status: "ok",
+      omitted: noChanges,
       checkpoint: {{
         id: "checkpoint-1",
+        workspace: payload.cwd,
         accepted: true,
         changeScope: "turn",
         turnStatus: payload.status,
+        changedFileCount: noChanges ? 0 : 1,
+        changedFiles: noChanges ? [] : [{{ path: "a.txt" }}],
       }},
     }};
   }}
   if (path === "/workspace-checkpoint/preview-revert") {{
     lastPreviewPayload = payload;
+    markPreviewStarted?.();
+    if (holdPreview) {{
+      await new Promise((resolve) => {{
+        releasePreview = resolve;
+      }});
+    }}
     return {{ status: "ok", hasChanges: false, changedPaths: [] }};
   }}
   if (path === "/workspace-checkpoint/restore-for-revert") {{
@@ -886,8 +952,28 @@ api.setBackendSettingsForTest({{
   await raceCompletionPromise;
   const raceCompletedTurnPayload = lastCompletePayload;
 
+  lastCompletePayload = null;
+  await turnCompletedCallback({{
+    method: "turn/completed",
+    params: {{
+      threadId: "thread-12345678",
+      turn: {{ id: "fast-turn", status: "completed" }},
+    }},
+  }});
+  const fastCompletionPayload = lastCompletePayload;
+
+  const previewStartedPromise = new Promise((resolve) => {{
+    markPreviewStarted = resolve;
+  }});
+  holdPreview = true;
   editorQueryEnabled = true;
   api.installEditButtons();
+  await previewStartedPromise;
+  const editButtonDisabledFromCompletionHint = insertedEditButton?.disabled === true;
+  const editButtonTitleFromCompletionHint = insertedEditButton?.title || "";
+  const editButtonPreviewPendingAfterHint = typeof releasePreview === "function";
+  holdPreview = false;
+  releasePreview?.();
   await Promise.resolve();
   await Promise.resolve();
 
@@ -933,7 +1019,7 @@ api.setBackendSettingsForTest({{
       changeScope: "turn",
       turnStatus: "completed",
       createdAtMs: Date.now(),
-      promptPreview: "<unsafe prompt>",
+      promptPreview: "不应显示的空轮次",
       changedFileCount: 0,
       changedFiles: [],
     }},
@@ -958,7 +1044,7 @@ api.setBackendSettingsForTest({{
       changeScope: "turn",
       turnStatus: "failed",
       createdAtMs: Date.now(),
-      promptPreview: "失败请求",
+      promptPreview: "<unsafe prompt>",
       changedFileCount: 1,
       changedFiles: [
         {{ path: "src/failed.rs", status: "M", additions: 2, deletions: 1 }},
@@ -971,7 +1057,7 @@ api.setBackendSettingsForTest({{
       turnStatus: "interrupted",
       createdAtMs: Date.now(),
       promptPreview: "中断请求",
-      changedFileCount: 0,
+      changedFileCount: 1,
       changedFiles: [],
     }},
     {{
@@ -1269,8 +1355,12 @@ api.setBackendSettingsForTest({{
     completedTurnPayload,
     completionWaitedForBind,
     raceCompletedTurnPayload,
+    fastCompletionPayload,
     editButtonText: insertedEditButton?.textContent || "",
     editButtonType: insertedEditButton?.type || "",
+    editButtonDisabledFromCompletionHint,
+    editButtonTitleFromCompletionHint,
+    editButtonPreviewPendingAfterHint,
     editButtonDisabledWhenNoChanges: insertedEditButton?.disabled === true,
     editButtonTitle: insertedEditButton?.title || "",
     editButtonPreviewNumTurns: lastPreviewPayload?.numTurns || 0,
@@ -1298,7 +1388,10 @@ api.setBackendSettingsForTest({{
       !checkpointDialogHtml.includes("<unsafe prompt>"),
     checkpointDialogHasTotalStat:
       checkpointDialogHtml.includes("+22") && checkpointDialogHtml.includes("-7"),
-    checkpointDialogHasNoChange: checkpointDialogHtml.includes("本轮无文件变化"),
+    checkpointDialogOmitsCompletedNoChange:
+      !checkpointDialogHtml.includes("completed-1") &&
+      !checkpointDialogHtml.includes("不应显示的空轮次") &&
+      !checkpointDialogHtml.includes("本轮无文件变化"),
     checkpointDialogHasPendingChangeCapture:
       checkpointDialogHtml.includes("正在记录本轮文件变化…"),
     checkpointDialogHasLegacyFallback: checkpointDialogHtml.includes("文件明细不可用"),
@@ -1476,7 +1569,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "87";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "89";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -3559,7 +3652,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("data-codex-open-in-button"));
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "8";"#));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "87";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "89";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));

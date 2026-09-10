@@ -621,6 +621,7 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
             let base_url_message = sync_applied_base_url_after_settings_save(&settings);
             let stream_idle_timeout_message =
                 sync_applied_stream_idle_timeout_after_settings_save(&settings);
+            let multi_agent_v2_message = sync_applied_multi_agent_v2_after_settings_save(&settings);
             let catalog_message = sync_applied_model_catalog_after_settings_save(&settings);
             let websocket_message = sync_applied_websocket_after_settings_save(&settings);
             let overlay_changed = previous_overlay
@@ -638,7 +639,7 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
             };
             settings_payload(
                 &format!(
-                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{stream_idle_timeout_message}{catalog_message}{websocket_message}{overlay_message}{lan_proxy_message}"
+                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{stream_idle_timeout_message}{multi_agent_v2_message}{catalog_message}{websocket_message}{overlay_message}{lan_proxy_message}"
                 ),
                 "设置保存后重新读取失败",
             )
@@ -3656,6 +3657,31 @@ fn sync_applied_stream_idle_timeout_after_settings_save_in_home(
     )
 }
 
+fn sync_applied_multi_agent_v2_after_settings_save(settings: &BackendSettings) -> String {
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(settings);
+    match sync_applied_multi_agent_v2_after_settings_save_in_home(&home, settings) {
+        Ok(true) => " Multi Agent V2 配置已同步。".to_string(),
+        Ok(false) => String::new(),
+        Err(error) => format!(" 但 Multi Agent V2 配置同步失败：{error}。"),
+    }
+}
+
+fn sync_applied_multi_agent_v2_after_settings_save_in_home(
+    home: &Path,
+    settings: &BackendSettings,
+) -> anyhow::Result<bool> {
+    if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
+        return Ok(false);
+    }
+    let relay = settings.active_relay_profile();
+    if relay.relay_mode == codex_elves_core::settings::RelayMode::Official
+        && !relay.official_mix_api_key
+    {
+        return Ok(false);
+    }
+    codex_elves_core::relay_config::sync_applied_relay_profile_multi_agent_v2_to_home(home, &relay)
+}
+
 fn sync_applied_model_catalog_after_settings_save(settings: &BackendSettings) -> String {
     if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
         return String::new();
@@ -5249,6 +5275,36 @@ base_url = "https://manual.example/v1"
             "stream_idle_timeout_ms = {}",
             codex_elves_core::relay_config::LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS
         )));
+    }
+
+    #[test]
+    fn saving_active_profile_syncs_multi_agent_v2_to_live_config() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "model_provider = \"custom\"\n\n[features]\ngoals = true\n",
+        )
+        .unwrap();
+        let settings = BackendSettings {
+            active_relay_id: "supplier-a".to_string(),
+            relay_profiles: vec![RelayProfile {
+                id: "supplier-a".to_string(),
+                relay_mode: codex_elves_core::settings::RelayMode::PureApi,
+                config_contents:
+                    "model_provider = \"custom\"\n\n[features]\nmulti_agent_v2 = true\n".to_string(),
+                ..RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+
+        assert!(
+            sync_applied_multi_agent_v2_after_settings_save_in_home(temp.path(), &settings)
+                .unwrap()
+        );
+
+        let live = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+        assert!(live.contains("goals = true"));
+        assert!(live.contains("multi_agent_v2 = true"));
     }
 
     #[test]

@@ -18,6 +18,7 @@ const RELAY_PROVIDER: &str = "custom";
 const LEGACY_RELAY_PROVIDERS: &[&str] = &["CodexElves", "CodexPP"];
 const CHAT_UPSTREAM_BASE_URL_KEY: &str = "codex_elves_chat_base_url";
 const STREAM_IDLE_TIMEOUT_MS_KEY: &str = "stream_idle_timeout_ms";
+const MULTI_AGENT_V2_FEATURE_KEY: &str = "multi_agent_v2";
 pub const LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS: u64 = 3_600_000;
 const GENERATED_MODEL_CATALOG_FILENAME: &str = "codex-elves-model-catalog.json";
 const RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
@@ -511,6 +512,11 @@ fn apply_relay_profile_owned_fields_to_config(
             profile.auto_compact_limit.trim(),
         );
     }
+    updated = if relay_profile_multi_agent_v2_enabled(profile) {
+        set_table_toml_raw_line(&updated, "features", MULTI_AGENT_V2_FEATURE_KEY, "true")
+    } else {
+        remove_table_key(&updated, "features", MULTI_AGENT_V2_FEATURE_KEY)
+    };
 
     apply_owned_model_catalog_to_config(home, &updated, profile)
 }
@@ -728,6 +734,32 @@ pub fn sync_applied_relay_profile_provider_name_to_home(
     let provider_table = format!("model_providers.{live_provider}");
     let provider_name = relay_profile_provider_name(profile, &profile_provider);
     let updated = set_table_toml_string_line(&live_config, &provider_table, "name", &provider_name);
+    if updated != live_config {
+        write_codex_live_atomic(home, Some(&updated), None, false)?;
+    }
+    Ok(true)
+}
+
+/// 把当前活跃供应商的 Multi Agent V2 开关同步到 live `config.toml`。
+///
+/// 只在 live 的 `model_provider` 与该供应商一致时修改
+/// `[features].multi_agent_v2`，保留同表中的其它 feature。
+pub fn sync_applied_relay_profile_multi_agent_v2_to_home(
+    home: &Path,
+    profile: &RelayProfile,
+) -> anyhow::Result<bool> {
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    let live_provider = root_key_string(&live_config, "model_provider").unwrap_or_default();
+    let profile_provider = relay_profile_provider_id(profile)?;
+    if live_provider.trim() != profile_provider.trim() {
+        return Ok(false);
+    }
+
+    let updated = if relay_profile_multi_agent_v2_enabled(profile) {
+        set_table_toml_raw_line(&live_config, "features", MULTI_AGENT_V2_FEATURE_KEY, "true")
+    } else {
+        remove_table_key(&live_config, "features", MULTI_AGENT_V2_FEATURE_KEY)
+    };
     if updated != live_config {
         write_codex_live_atomic(home, Some(&updated), None, false)?;
     }
@@ -2647,6 +2679,7 @@ fn generated_model_catalog_json_with_codex_catalog(
     let reasoning_effort = catalog_reasoning_effort(config_text);
     let auto_compact_limit =
         parse_optional_positive_u64(&profile.auto_compact_limit, "压缩上下文大小")?;
+    let multi_agent_v2_enabled = relay_profile_multi_agent_v2_enabled(profile);
     let mut models = Vec::new();
 
     for (index, row) in rows.into_iter().enumerate() {
@@ -2711,6 +2744,9 @@ fn generated_model_catalog_json_with_codex_catalog(
         entry.insert("support_verbosity".to_string(), json!(true));
         entry.insert("supports_image_detail_original".to_string(), json!(true));
         entry.insert("supports_parallel_tool_calls".to_string(), json!(true));
+        if multi_agent_v2_enabled {
+            entry.insert("multi_agent_version".to_string(), json!("v2"));
+        }
         entry.insert("supports_reasoning_summaries".to_string(), json!(true));
         entry.insert("supports_search_tool".to_string(), json!(true));
         entry.insert("default_reasoning_summary".to_string(), json!("none"));
@@ -2872,6 +2908,18 @@ fn catalog_context_window_for_model(model: &str, configured: &str) -> String {
     crate::model_capabilities::known_model_context_window(model)
         .map(|value| value.to_string())
         .unwrap_or_default()
+}
+
+fn relay_profile_multi_agent_v2_enabled(profile: &RelayProfile) -> bool {
+    parse_toml_document(&profile.config_contents)
+        .ok()
+        .and_then(|doc| {
+            doc.get("features")
+                .and_then(Item::as_table)
+                .and_then(|features| features.get(MULTI_AGENT_V2_FEATURE_KEY))
+                .and_then(Item::as_bool)
+        })
+        .unwrap_or(false)
 }
 
 fn model_prefers_max_reasoning_default(model: &str) -> bool {
@@ -4581,6 +4629,29 @@ mod tests {
                 .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("fast"))),
             "GPT-5.6 生成目录应包含 fast speed tier"
         );
+    }
+
+    #[test]
+    fn generated_model_catalog_syncs_multi_agent_v2_capability() {
+        let mut profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: crate::settings::RelayProtocol::Responses,
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: String::new(),
+                context_window: "372000".to_string(),
+                protocol: RelayProtocol::Responses,
+            }],
+            ..RelayProfile::default()
+        };
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
+
+        let disabled = generated_model_catalog_json(&profile, "", rows.clone()).unwrap();
+        assert!(disabled["models"][0].get("multi_agent_version").is_none());
+
+        profile.config_contents = "[features]\nmulti_agent_v2 = true\n".to_string();
+        let enabled = generated_model_catalog_json(&profile, "", rows).unwrap();
+        assert_eq!(enabled["models"][0]["multi_agent_version"], "v2");
     }
 
     #[test]

@@ -333,6 +333,7 @@ const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:45221/v1";
 const CHAT_UPSTREAM_BASE_URL_KEY = "codex_elves_chat_base_url";
 const SCRIPT_MARKET_REPOSITORY_URL = "https://github.com/BigPizzaV3/CodexElvesScriptMarket";
 const REMOTE_COMPACTION_V2_PROVIDER_NAME = "OpenAI";
+const MULTI_AGENT_V2_FEATURE_KEY = "multi_agent_v2";
 const COMPACTION_MODEL_FAMILIES: Array<{ value: ModelFamily; label: string }> = [
   { value: "gpt", label: "GPT 会话" },
   { value: "claude", label: "Claude 会话" },
@@ -5327,6 +5328,7 @@ function RelayScreen({
   const saveRelaySettings = async (next: BackendSettings) => {
     onFormChange(next);
     await actions.saveSettingsValue(next, true);
+    await actions.refreshRelayFiles();
   };
   const createNewAggregateProfile = () => {
     const draft = createAggregateRelayProfile(normalized);
@@ -8064,6 +8066,7 @@ function RelayProfileEditor({
   const responsesWebsocketToggleChecked =
     responsesWebsocketToggleEnabled && profile.responsesWebsocketEnabled;
   const remoteCompactionV2Enabled = relayRemoteCompactionV2Enabled(profile);
+  const multiAgentV2Enabled = relayMultiAgentV2Enabled(profile);
   const responsesWebsocketLabel =
     probingResponsesWebsocket
       ? "探测中"
@@ -8397,6 +8400,35 @@ function RelayProfileEditor({
               type="checkbox"
             />
             <span>启用压缩</span>
+          </label>
+        </div>
+      ) : null}
+      {showApiFields ? (
+        <div className="relay-remote-compaction-panel">
+          <div className="relay-remote-compaction-copy">
+            <strong>Multi Agent V2</strong>
+            <span>
+              开启后，保存供应商配置会写入
+              {" "}
+              <code>[features].{MULTI_AGENT_V2_FEATURE_KEY}</code>
+              {" "}
+              并将当前供应商生成的模型目录标记为多代理 V2。
+            </span>
+          </div>
+          <label className="relay-remote-compaction-toggle">
+            <input
+              checked={multiAgentV2Enabled}
+              onChange={(event) =>
+                updateDraft({
+                  configContents: setRelayMultiAgentV2Enabled(
+                    profile.configContents,
+                    event.currentTarget.checked,
+                  ),
+                })
+              }
+              type="checkbox"
+            />
+            <span>启用多代理</span>
           </label>
         </div>
       ) : null}
@@ -10333,6 +10365,7 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
   const apiKey = relayProfileEffectiveApiKey(profile);
   const modelCatalogCount = relayProfileCatalogModelCount(profile);
   const contextWindow = relayProfileContextWindowForActiveModel(profile).trim();
+  const multiAgentV2Enabled = relayMultiAgentV2Enabled(profile);
   const rows: RelayActivationImpactRow[] = [
     {
       file: "config.toml",
@@ -10410,6 +10443,15 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
     },
     {
       file: "config.toml",
+      field: `features.${MULTI_AGENT_V2_FEATURE_KEY}`,
+      value: multiAgentV2Enabled ? "true" : "不写入",
+      detail: multiAgentV2Enabled
+        ? "启用 Codex Multi Agent V2。"
+        : "当前供应商不启用 Multi Agent V2。",
+      tone: multiAgentV2Enabled ? "write" : "skip",
+    },
+    {
+      file: "config.toml",
       field: "model_catalog_json",
       value: modelCatalogCount ? "codex-elves-model-catalog.json" : "不写入",
       detail: modelCatalogCount ? "模型列表会生成独立目录文件供 Codex 读取。" : "没有模型映射时不生成模型目录。",
@@ -10422,9 +10464,20 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
       file: "codex-elves-model-catalog.json",
       field: "models",
       value: `${modelCatalogCount} 个模型`,
-      detail: "由模型列表生成，包含协议和上下文大小信息。",
+      detail: multiAgentV2Enabled
+        ? "由模型列表生成，包含协议、上下文大小和 Multi Agent V2 能力。"
+        : "由模型列表生成，包含协议和上下文大小信息。",
       tone: "file",
     });
+    if (multiAgentV2Enabled) {
+      rows.push({
+        file: "codex-elves-model-catalog.json",
+        field: "models[].multi_agent_version",
+        value: "v2",
+        detail: "当前供应商的所有生成模型条目使用多代理 V2。",
+        tone: "write",
+      });
+    }
   }
 
   rows.push({
@@ -10471,6 +10524,20 @@ function setRelayRemoteCompactionV2Enabled(contents: string, enabled: boolean): 
     "name",
     enabled ? REMOTE_COMPACTION_V2_PROVIDER_NAME : provider,
   );
+}
+
+function relayMultiAgentV2Enabled(profile: RelayProfile): boolean {
+  return tomlSectionBoolValue(
+    profile.configContents,
+    "features",
+    MULTI_AGENT_V2_FEATURE_KEY,
+  );
+}
+
+function setRelayMultiAgentV2Enabled(contents: string, enabled: boolean): string {
+  return enabled
+    ? setTomlSectionBoolKey(contents, "features", MULTI_AGENT_V2_FEATURE_KEY, true)
+    : removeTomlSectionKey(contents, "features", MULTI_AGENT_V2_FEATURE_KEY);
 }
 
 function relayProfileEffectiveBaseUrl(profile: RelayProfile): string {
@@ -12749,6 +12816,22 @@ function tomlStringAssignmentValue(line: string, key: string): string | null {
   const match = new RegExp(`^\\s*${key}\\s*=\\s*([\"'])(.*)\\1\\s*(?:#.*)?$`).exec(line.trim());
   if (!match) return null;
   return match[2].replace(/\\(["'\\])/g, "$1");
+}
+
+function tomlSectionBoolValue(contents: string, sectionName: string, key: string): boolean {
+  let currentSection = "";
+  const pattern = new RegExp(`^\\s*${key}\\s*=\\s*(true|false)\\s*(?:#.*)?$`);
+  for (const line of contents.split(/\r?\n/)) {
+    const section = tomlSectionName(line);
+    if (section !== null) {
+      currentSection = section;
+      continue;
+    }
+    if (currentSection !== sectionName) continue;
+    const match = pattern.exec(line);
+    if (match) return match[1] === "true";
+  }
+  return false;
 }
 
 function setAuthOpenAiApiKey(contents: string, apiKey: string): string {
